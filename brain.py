@@ -35,7 +35,7 @@ CENTRAL           = ZoneInfo("America/Chicago")
 CONFIDENCE_THRESHOLD = 0.85   # minimum confidence to trade
 MAX_DOLLARS          = 50     # max position size in dollars
 MIN_DOLLARS          = 10     # min position size at threshold confidence
-WINDOW_HOURS         = 12     # only trade markets closing within this many hours
+WINDOW_HOURS         = 18     # only trade markets closing within this many hours
 
 # Forecast uncertainty model:
 # Open-Meteo daily forecasts have ~2-3°F typical error for same-day,
@@ -48,7 +48,7 @@ WEATHER_SERIES = [
     ("KXLOWTNOLA",  "low"),
 ]
 
-DRY_RUN = False  # Set True to print orders without submitting
+DRY_RUN = True  # Set True to print orders without submitting
 
 
 # ── Kalshi auth helpers ────────────────────────────────────────────────────────
@@ -134,36 +134,23 @@ def fetch_forecast():
 # ── Market parsing ─────────────────────────────────────────────────────────────
 
 def parse_threshold(title):
-    """
-    Extract the numeric threshold and direction from a market title.
-    Examples:
-      "New Orleans high temp above 90°F on May 25" → (90.0, "above")
-      "Will New Orleans low be at or below 72°F?"  → (72.0, "at_or_below")
-    Returns (threshold_float, direction_str) or None.
-    """
     title_lower = title.lower()
 
-    # Direction keywords
-    if "at or above" in title_lower or "at or higher" in title_lower:
-        direction = "at_or_above"
-    elif "above" in title_lower or "higher than" in title_lower or "exceed" in title_lower:
+    # Range markets like "83-84°" — skip for now, needs different logic
+    if re.search(r"\d+[-–]\d+", title):
+        return None
+    # Direction from symbols or words
+    if ">" in title or "above" in title_lower or "higher" in title_lower:
         direction = "above"
-    elif "at or below" in title_lower or "at or lower" in title_lower:
-        direction = "at_or_below"
-    elif "below" in title_lower or "lower than" in title_lower:
+    elif "<" in title or "below" in title_lower or "lower" in title_lower:
         direction = "below"
     else:
         return None
-
-    # Find the temperature number (handles "90", "90°F", "90 °F", "90f")
-    match = re.search(r"(\d+(?:\.\d+)?)\s*[°]?\s*f\b", title_lower)
-    if not match:
-        match = re.search(r"(\d+(?:\.\d+)?)", title)
+    # Match number followed by optional °, optional F
+    match = re.search(r"(\d+(?:\.\d+)?)\s*[°f]", title_lower)
     if not match:
         return None
-
     return float(match.group(1)), direction
-
 
 def market_closes_within(market, hours):
     """Return True if the market closes within `hours` from now."""
