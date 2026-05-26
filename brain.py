@@ -42,7 +42,7 @@ PRIVATE_KEY_PATH  = os.getenv("KALSHI_PRIVATE_KEY_PATH")
 BASE_URL          = "https://api.elections.kalshi.com/trade-api/v2"
 CENTRAL           = ZoneInfo("America/Chicago")
 
-CONFIDENCE_THRESHOLD = 0.85   # minimum confidence to trade
+CONFIDENCE_THRESHOLD = 0.80   # minimum confidence to trade
 MAX_DOLLARS          = 50     # max position size in dollars
 MIN_DOLLARS          = 10     # min position size at threshold confidence
 WINDOW_HOURS         = 18     # only trade markets closing within this many hours
@@ -146,9 +146,13 @@ def fetch_forecast():
 def parse_threshold(title):
     title_lower = title.lower()
 
-    # Range markets like "83-84°" — skip for now, needs different logic
-    if re.search(r"\d+[-–]\d+", title):
-        return None
+    # Range markets like "83-84°"
+    range_match = re.search(r"(\d+)\s*[-–]\s*(\d+)\s*°", title)
+    if range_match:
+        low  = float(range_match.group(1))
+        high = float(range_match.group(2))
+        return (low, high, "range")
+
     # Direction from symbols or words
     if ">" in title or "above" in title_lower or "higher" in title_lower:
         direction = "above"
@@ -156,7 +160,7 @@ def parse_threshold(title):
         direction = "below"
     else:
         return None
-    # Match number followed by optional °, optional F
+
     match = re.search(r"(\d+(?:\.\d+)?)\s*[°f]", title_lower)
     if not match:
         return None
@@ -182,40 +186,41 @@ def normal_cdf(x, mu, sigma):
     """P(X <= x) for X ~ N(mu, sigma)."""
     return 0.5 * (1 + math.erf((x - mu) / (sigma * math.sqrt(2))))
 
-def compute_confidence(forecast_temp, threshold, direction):
-    """
-    Use a normal distribution centred on the forecast to compute
-    P(actual resolves Yes) for the given direction.
-    """
+def compute_confidence(forecast_temp, threshold, direction=None):
     mu    = forecast_temp
     sigma = FORECAST_STD_DEV
 
-    if direction in ("above",):
-        # P(actual > threshold)
+    # Range market — P(actual falls between low and high)
+    if direction == "range":
+        low, high = threshold
+        confidence_yes = normal_cdf(high + 0.5, mu, sigma) - normal_cdf(low - 0.5, mu, sigma)
+        confidence_no  = 1 - confidence_yes
+        if confidence_yes >= confidence_no:
+            return "yes", confidence_yes
+        else:
+            return "no", confidence_no
+
+    if direction == "above":
         confidence_yes = 1 - normal_cdf(threshold, mu, sigma)
-    elif direction in ("at_or_above",):
-        # P(actual >= threshold) ≈ P(actual > threshold - 0.5) for integer °F
+    elif direction == "at_or_above":
         confidence_yes = 1 - normal_cdf(threshold - 0.5, mu, sigma)
-    elif direction in ("below",):
-        # P(actual < threshold)
+    elif direction == "below":
         confidence_yes = normal_cdf(threshold, mu, sigma)
-    elif direction in ("at_or_below",):
+    elif direction == "at_or_below":
         confidence_yes = normal_cdf(threshold + 0.5, mu, sigma)
     else:
         return None, None
 
     confidence_no = 1 - confidence_yes
-
     if confidence_yes >= confidence_no:
         return "yes", confidence_yes
     else:
         return "no", confidence_no
-
 def scale_dollars(confidence):
     """
     Linear scale: 85% confidence → $10, 99%+ confidence → $50.
     """
-    low_conf  = CONFIDENCE_THRESHOLD       # 0.85
+    low_conf  = CONFIDENCE_THRESHOLD       # 0.80
     high_conf = 0.99
     clamped   = min(max(confidence, low_conf), high_conf)
     frac      = (clamped - low_conf) / (high_conf - low_conf)
@@ -293,8 +298,11 @@ def run():
             if not parsed:
                 log.info(f"  SKIP (can't parse threshold): {title}")
                 continue
-            threshold, direction = parsed
-
+            if len(parsed) == 3:
+                threshold = (parsed[0], parsed[1])
+                direction = parsed[2]
+            else:
+                threshold, direction = parsed
             # 3. Compute confidence
             side, confidence = compute_confidence(forecast_temp, threshold, direction)
             if confidence is None or confidence < CONFIDENCE_THRESHOLD:
