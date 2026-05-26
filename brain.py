@@ -9,6 +9,7 @@ Strategy:
   - If confidence >= 85%, place a limit order scaled to confidence ($10-$50)
 """
 
+import logging
 import os
 import re
 import math
@@ -24,6 +25,15 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding
 
 load_dotenv()
+
+# ── Logging setup ──────────────────────────────────────────────────────────────
+logging.basicConfig(
+    filename=r"C:\Users\Hayden\OneDrive\Desktop\weather-bot\bot.log",
+    level=logging.INFO,
+    format="%(asctime)s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+log = logging.getLogger()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -127,7 +137,7 @@ def fetch_forecast():
     forecast_high = max(today_temps)
     forecast_low  = min(today_temps)
 
-    print(f"[forecast] Today high={forecast_high:.1f}°F  low={forecast_low:.1f}°F")
+    log.info(f"[forecast] Today high={forecast_high:.1f}°F  low={forecast_low:.1f}°F")
     return forecast_high, forecast_low
 
 
@@ -254,18 +264,19 @@ def place_limit_order(private_key, ticker, side, price_cents, num_contracts):
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def run():
+    log.info("===== Bot run started =====")
     private_key = load_private_key(PRIVATE_KEY_PATH)
     forecast_high, forecast_low = fetch_forecast()
 
     for series, temp_type in WEATHER_SERIES:
         forecast_temp = forecast_high if temp_type == "high" else forecast_low
-        print(f"\n── {series} (forecast {temp_type}: {forecast_temp:.1f}°F) ──")
+        log.info(f"\n── {series} (forecast {temp_type}: {forecast_temp:.1f}°F) ──")
 
         resp    = kalshi_get(private_key, f"/markets?series_ticker={series}&status=open")
         markets = resp.json().get("markets", [])
 
         if not markets:
-            print("  No open markets.")
+            log.info("  No open markets.")
             continue
 
         for m in markets:
@@ -274,20 +285,20 @@ def run():
 
             # 1. Filter: must close within window
             if not market_closes_within(m, WINDOW_HOURS):
-                print(f"  SKIP (outside {WINDOW_HOURS}h window): {title}")
+                log.info(f"  SKIP (outside {WINDOW_HOURS}h window): {title}")
                 continue
 
             # 2. Parse threshold from title
             parsed = parse_threshold(title)
             if not parsed:
-                print(f"  SKIP (can't parse threshold): {title}")
+                log.info(f"  SKIP (can't parse threshold): {title}")
                 continue
             threshold, direction = parsed
 
             # 3. Compute confidence
             side, confidence = compute_confidence(forecast_temp, threshold, direction)
             if confidence is None or confidence < CONFIDENCE_THRESHOLD:
-                print(f"  SKIP (confidence {confidence:.1%} < {CONFIDENCE_THRESHOLD:.0%}): {title}")
+                log.info(f"  SKIP (confidence {confidence:.1%} < {CONFIDENCE_THRESHOLD:.0%}): {title}")
                 continue
 
             # 4. Determine ask price for our chosen side
@@ -296,23 +307,24 @@ def run():
             ask_price = yes_ask if side == "yes" else no_ask
 
             if ask_price is None or ask_price <= 0:
-                print(f"  SKIP (no ask price for {side}): {title}")
+                log.info(f"  SKIP (no ask price for {side}): {title}")
                 continue
 
             # 5. Scale dollars → contracts
             dollars   = scale_dollars(confidence)
             contracts = dollars_to_contracts(dollars, ask_price)
 
-            print(f"  TRADE: {title}")
-            print(f"    Threshold={threshold}°F  Direction={direction}")
-            print(f"    Confidence={confidence:.1%}  Side={side.upper()}")
-            print(f"    Ask={ask_price}¢  Budget=${dollars:.2f}  Contracts={contracts}")
+            log.info(f"  TRADE: {title}")
+            log.info(f"    Threshold={threshold}°F  Direction={direction}")
+            log.info(f"    Confidence={confidence:.1%}  Side={side.upper()}")
+            log.info(f"    Ask={ask_price}¢  Budget=${dollars:.2f}  Contracts={contracts}")
 
             # 6. Place limit order (1¢ below ask to get a slightly better fill)
             limit_price = max(1, ask_price - 1)
             result = place_limit_order(private_key, ticker, side, limit_price, contracts)
-            print(f"    Order result: {result}")
+            log.info(f"    Order result: {result}")
 
 
 if __name__ == "__main__":
+    log.info("===== Bot run complete =====")
     run()
