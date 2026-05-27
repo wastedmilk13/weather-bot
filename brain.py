@@ -108,38 +108,70 @@ def kalshi_post(private_key, path, body):
 def fetch_forecast():
     """
     Returns today's forecast high and low for New Orleans (°F)
-    using Open-Meteo hourly data for a tighter same-day read.
+    using an average of Open-Meteo ensemble model and NWS API.
     """
-    url = (
-        "https://api.open-meteo.com/v1/forecast"
-        "?latitude=29.9511&longitude=-90.0715"
-        "&hourly=temperature_2m"
-        "&temperature_unit=fahrenheit"
-        "&timezone=America%2FChicago"
-        "&forecast_days=2"
-    )
-    data = requests.get(url).json()
-    times  = data["hourly"]["time"]
-    temps  = data["hourly"]["temperature_2m"]
+    # ── Source 1: Open-Meteo Ensemble ──────────────────────────────────────
+    try:
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            "?latitude=29.9511&longitude=-90.0715"
+            "&hourly=temperature_2m"
+            "&temperature_unit=fahrenheit"
+            "&timezone=America%2FChicago"
+            "&forecast_days=2"
+            "&models=ensemble_mean"
+        )
+        data = requests.get(url, timeout=10).json()
+        times = data["hourly"]["time"]
+        temps = data["hourly"]["temperature_2m"]
+        now = datetime.datetime.now(CENTRAL)
+        today_str = now.strftime("%Y-%m-%d")
+        today_temps = [
+            t for ts, t in zip(times, temps)
+            if ts.startswith(today_str) and t is not None
+        ]
+        ensemble_high = max(today_temps)
+        ensemble_low  = min(today_temps)
+        log.info(f"[open-meteo ensemble] high={ensemble_high:.1f}°F  low={ensemble_low:.1f}°F")
+    except Exception as e:
+        log.info(f"[open-meteo ensemble] FAILED: {e}")
+        ensemble_high = ensemble_low = None
 
-    now        = datetime.datetime.now(CENTRAL)
-    today_str  = now.strftime("%Y-%m-%d")
-    today_temps = [
-        t for ts, t in zip(times, temps)
-        if ts.startswith(today_str) and t is not None
-    ]
+    # ── Source 2: National Weather Service ────────────────────────────────
+    try:
+        # NWS gridpoint for New Orleans
+        points_url = "https://api.weather.gov/points/29.9511,-90.0715"
+        headers = {"User-Agent": "weather-bot/1.0"}
+        points = requests.get(points_url, headers=headers, timeout=10).json()
+        forecast_url = points["properties"]["forecastHourly"]
+        forecast = requests.get(forecast_url, headers=headers, timeout=10).json()
+        periods = forecast["properties"]["periods"]
+        now = datetime.datetime.now(CENTRAL)
+        today_str = now.strftime("%Y-%m-%d")
+        nws_temps = [
+            p["temperature"] for p in periods
+            if p["startTime"].startswith(today_str)
+            and p["temperatureUnit"] == "F"
+        ]
+        nws_high = max(nws_temps) if nws_temps else None
+        nws_low  = min(nws_temps) if nws_temps else None
+        log.info(f"[nws] high={nws_high:.1f}°F  low={nws_low:.1f}°F")
+    except Exception as e:
+        log.info(f"[nws] FAILED: {e}")
+        nws_high = nws_low = None
 
-    if not today_temps:
-        raise RuntimeError("No forecast data for today.")
+    # ── Average available sources ──────────────────────────────────────────
+    highs = [h for h in [ensemble_high, nws_high] if h is not None]
+    lows  = [l for l in [ensemble_low,  nws_low]  if l is not None]
 
-    # For hours already past, use actuals-in-forecast as best estimate.
-    # For remaining hours, this is still the best we have.
-    forecast_high = max(today_temps)
-    forecast_low  = min(today_temps)
+    if not highs or not lows:
+        raise RuntimeError("All forecast sources failed.")
 
-    log.info(f"[forecast] Today high={forecast_high:.1f}°F  low={forecast_low:.1f}°F")
+    forecast_high = sum(highs) / len(highs)
+    forecast_low  = sum(lows)  / len(lows)
+
+    log.info(f"[forecast avg] high={forecast_high:.1f}°F  low={forecast_low:.1f}°F")
     return forecast_high, forecast_low
-
 
 # ── Market parsing ─────────────────────────────────────────────────────────────
 
