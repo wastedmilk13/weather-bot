@@ -109,18 +109,27 @@ def fetch_cli_report():
     """
     Fetch the NWS Climatological Daily Report for MSY (New Orleans Airport).
     This is the exact source Kalshi uses to resolve temperature markets.
-    Returns (official_high, official_low) or (None, None) if unavailable.
+    Only returns data if the report is for TODAY — otherwise returns (None, None).
     """
     try:
         url = "https://forecast.weather.gov/product.php?site=LIX&product=CLI&issuedby=MSY"
         headers = {"User-Agent": "weather-bot/1.0"}
         resp = requests.get(url, headers=headers, timeout=10)
         text = resp.text
+
+        # Check the report date matches today
+        today_str = datetime.datetime.now(CENTRAL).strftime("%B %d, %Y").upper()
+        # e.g. "MAY 28, 2026"
+        if today_str not in text.upper():
+            log.info(f"[cli report] Report is not for today ({today_str}), skipping")
+            return None, None
+
         high_match = re.search(r"MAXIMUM\s+(\d+)", text, re.IGNORECASE)
         low_match  = re.search(r"MINIMUM\s+(\d+)", text, re.IGNORECASE)
         if not high_match or not low_match:
             log.info("[cli report] Could not parse high/low from report")
             return None, None
+
         cli_high = float(high_match.group(1))
         cli_low  = float(low_match.group(1))
         log.info(f"[cli report] high={cli_high:.1f}°F  low={cli_low:.1f}°F")
@@ -128,7 +137,6 @@ def fetch_cli_report():
     except Exception as e:
         log.info(f"[cli report] FAILED: {e}")
         return None, None
-
 def fetch_observed_high_low():
     """
     Fetch today's observed high and low from NWS station KMSY (New Orleans Airport).
