@@ -52,6 +52,7 @@ WINDOW_HOURS         = 18     # only trade markets closing within this many hour
 # slightly more for next-day. We use a normal distribution around the
 # forecast to compute P(actual > threshold).
 FORECAST_STD_DEV = 2.5        # °F — tunable based on observed accuracy
+CLI_STD_DEV = 0.6             # °F — tight when using actual CLI data
 
 WEATHER_SERIES = [
     ("KXHIGHTNOLA", "high"),
@@ -222,7 +223,7 @@ def fetch_forecast():
     cli_high, cli_low = fetch_cli_report()
     if cli_high is not None:
         log.info("[using cli report as ground truth]")
-        return cli_high, cli_low
+        return cli_high, cli_low, True
 
     # ── Otherwise blend with observed ─────────────────────────────────────
     observed_high, observed_low = fetch_observed_high_low()
@@ -233,8 +234,7 @@ def fetch_forecast():
         forecast_low  = obs_weight * observed_low  + (1 - obs_weight) * forecast_low
         log.info(f"[blended] high={forecast_high:.1f}°F  low={forecast_low:.1f}°F  (obs_weight={obs_weight:.0%})")
 
-    return forecast_high, forecast_low
-
+    return forecast_high, forecast_low, False
 # ── Market parsing ─────────────────────────────────────────────────────────────
 def parse_threshold(title):
     title_lower = title.lower()
@@ -364,7 +364,10 @@ def place_limit_order(private_key, ticker, side, price_cents, num_contracts):
 def run():
     log.info("===== Bot run started =====")
     private_key = load_private_key(PRIVATE_KEY_PATH)
-    forecast_high, forecast_low = fetch_forecast()
+    forecast_high, forecast_low, using_cli = fetch_forecast()
+    global FORECAST_STD_DEV
+    FORECAST_STD_DEV = CLI_STD_DEV if using_cli else 2.5
+    log.info(f"[std dev] {'CLI' if using_cli else 'forecast'} mode: {FORECAST_STD_DEV}°F")
 
     for series, temp_type in WEATHER_SERIES:
         forecast_temp = forecast_high if temp_type == "high" else forecast_low
