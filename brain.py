@@ -330,7 +330,8 @@ def compute_confidence(forecast_temp, threshold, direction=None):
     else:
         return "no", confidence_no
 
-def scale_dollars(co...    """
+def scale_dollars(confidence):
+    """
     Linear scale: 85% confidence → $10, 99%+ confidence → $50.
     """
     low_conf  = CONFIDENCE_THRESHOLD       # 0.80
