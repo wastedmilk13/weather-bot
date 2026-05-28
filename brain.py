@@ -104,13 +104,40 @@ def kalshi_post(private_key, path, body):
 
 
 # ── Weather forecast ───────────────────────────────────────────────────────────
+def fetch_observed_high_low():
+    """
+    Fetch today's observed high and low from NWS station KMSY (New Orleans Airport).
+    """
+    try:
+        url = "https://api.weather.gov/stations/KMSY/observations?limit=24"
+        headers = {"User-Agent": "weather-bot/1.0"}
+        resp = requests.get(url, headers=headers, timeout=10).json()
+        features = resp.get("features", [])
+        now = datetime.datetime.now(CENTRAL)
+        today_str = now.strftime("%Y-%m-%d")
+        temps = []
+        for f in features:
+            ts = f["properties"]["timestamp"]
+            temp_c = f["properties"]["temperature"]["value"]
+            if ts.startswith(today_str) and temp_c is not None:
+                temp_f = temp_c * 9/5 + 32
+                temps.append(temp_f)
+        if not temps:
+            return None, None
+        observed_high = max(temps)
+        observed_low  = min(temps)
+        log.info(f"[observed] high={observed_high:.1f}°F  low={observed_low:.1f}°F  ({len(temps)} readings)")
+        return observed_high, observed_low
+    except Exception as e:
+        log.info(f"[observed] FAILED: {e}")
+        return None, None
 
 def fetch_forecast():
     """
     Returns today's forecast high and low for New Orleans (°F)
-    using an average of Open-Meteo ensemble model and NWS API.
+    using an average of Open-Meteo and NWS, blended with observed temps.
     """
-    # ── Source 1: Open-Meteo Ensemble ──────────────────────────────────────
+    # ── Source 1: Open-Meteo ───────────────────────────────────────────────
     try:
         url = (
             "https://api.open-meteo.com/v1/forecast"
@@ -138,7 +165,6 @@ def fetch_forecast():
 
     # ── Source 2: National Weather Service ────────────────────────────────
     try:
-        # NWS gridpoint for New Orleans
         points_url = "https://api.weather.gov/points/29.9511,-90.0715"
         headers = {"User-Agent": "weather-bot/1.0"}
         points = requests.get(points_url, headers=headers, timeout=10).json()
@@ -159,17 +185,24 @@ def fetch_forecast():
         log.info(f"[nws] FAILED: {e}")
         nws_high = nws_low = None
 
-    # ── Average available sources ──────────────────────────────────────────
+    # ── Average sources ────────────────────────────────────────────────────
     highs = [h for h in [ensemble_high, nws_high] if h is not None]
     lows  = [l for l in [ensemble_low,  nws_low]  if l is not None]
-
     if not highs or not lows:
         raise RuntimeError("All forecast sources failed.")
-
     forecast_high = sum(highs) / len(highs)
     forecast_low  = sum(lows)  / len(lows)
-
     log.info(f"[forecast avg] high={forecast_high:.1f}°F  low={forecast_low:.1f}°F")
+
+    # ── Blend with observed ────────────────────────────────────────────────
+    observed_high, observed_low = fetch_observed_high_low()
+    if observed_high is not None:
+        hour = datetime.datetime.now(CENTRAL).hour
+        obs_weight = min(1.0, hour / 18)
+        forecast_high = obs_weight * observed_high + (1 - obs_weight) * forecast_high
+        forecast_low  = obs_weight * observed_low  + (1 - obs_weight) * forecast_low
+        log.info(f"[blended] high={forecast_high:.1f}°F  low={forecast_low:.1f}°F  (obs_weight={obs_weight:.0%})")
+
     return forecast_high, forecast_low
 
 # ── Market parsing ─────────────────────────────────────────────────────────────
