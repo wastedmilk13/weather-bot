@@ -427,9 +427,10 @@ def run():
                 continue
 
             # 4. Determine ask price for our chosen side
-            yes_ask = m.get("yes_ask")  # cents
-            no_ask  = m.get("no_ask")   # cents
-            ask_price = yes_ask if side == "yes" else no_ask
+            yes_ask = m.get("yes_ask_dollars")
+            no_ask  = m.get("no_ask_dollars")
+            ask_price_dollars = float(yes_ask) if side == "yes" else float(no_ask) if (yes_ask if side == "yes" else no_ask) else None
+            ask_price = round(ask_price_dollars * 100) if ask_price_dollars else None
 
             if ask_price is None or ask_price <= 0:
                 log.info(f"  SKIP (no ask price for {side}): {title}")
