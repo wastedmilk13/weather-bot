@@ -283,7 +283,27 @@ def compute_confidence(forecast_temp, threshold, direction=None):
     mu    = forecast_temp
     sigma = FORECAST_STD_DEV
 
-    # Range market — P(actual falls between low and high)
+    # When using CLI data (sigma is tiny), use direct comparison instead
+    # of normal distribution — the actual temp is known
+    if sigma <= CLI_STD_DEV:
+        if direction == "range":
+            low, high = threshold
+            if low <= mu <= high:
+                return "yes", 0.97
+            else:
+                return "no", 0.97
+        elif direction == "above":
+            return ("yes", 0.97) if mu > threshold else ("no", 0.97)
+        elif direction == "at_or_above":
+            return ("yes", 0.97) if mu >= threshold else ("no", 0.97)
+        elif direction == "below":
+            return ("yes", 0.97) if mu < threshold else ("no", 0.97)
+        elif direction == "at_or_below":
+            return ("yes", 0.97) if mu <= threshold else ("no", 0.97)
+        else:
+            return None, None
+
+    # Forecast mode — use normal distribution
     if direction == "range":
         low, high = threshold
         confidence_yes = normal_cdf(high + 0.5, mu, sigma) - normal_cdf(low - 0.5, mu, sigma)
@@ -309,8 +329,8 @@ def compute_confidence(forecast_temp, threshold, direction=None):
         return "yes", confidence_yes
     else:
         return "no", confidence_no
-def scale_dollars(confidence):
-    """
+
+def scale_dollars(co...    """
     Linear scale: 85% confidence → $10, 99%+ confidence → $50.
     """
     low_conf  = CONFIDENCE_THRESHOLD       # 0.80
