@@ -432,7 +432,7 @@ def run():
             ask_price_dollars = float(yes_ask) if side == "yes" else float(no_ask) if (yes_ask if side == "yes" else no_ask) else None
             ask_price = round(ask_price_dollars * 100) if ask_price_dollars else None
 
-            if ask_price is None or ask_price <= 0:
+            if ask_price is None or ask_price <= 0 or ask_price >= 99:
                 log.info(f"  SKIP (no ask price for {side}): {title}")
                 continue
 
