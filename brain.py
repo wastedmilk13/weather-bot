@@ -104,6 +104,30 @@ def kalshi_post(private_key, path, body):
 
 
 # ── Weather forecast ───────────────────────────────────────────────────────────
+def fetch_cli_report():
+    """
+    Fetch the NWS Climatological Daily Report for MSY (New Orleans Airport).
+    This is the exact source Kalshi uses to resolve temperature markets.
+    Returns (official_high, official_low) or (None, None) if unavailable.
+    """
+    try:
+        url = "https://forecast.weather.gov/product.php?site=LIX&product=CLI&issuedby=MSY"
+        headers = {"User-Agent": "weather-bot/1.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        text = resp.text
+        high_match = re.search(r"MAXIMUM\s+(\d+)", text, re.IGNORECASE)
+        low_match  = re.search(r"MINIMUM\s+(\d+)", text, re.IGNORECASE)
+        if not high_match or not low_match:
+            log.info("[cli report] Could not parse high/low from report")
+            return None, None
+        cli_high = float(high_match.group(1))
+        cli_low  = float(low_match.group(1))
+        log.info(f"[cli report] high={cli_high:.1f}°F  low={cli_low:.1f}°F")
+        return cli_high, cli_low
+    except Exception as e:
+        log.info(f"[cli report] FAILED: {e}")
+        return None, None
+
 def fetch_observed_high_low():
     """
     Fetch today's observed high and low from NWS station KMSY (New Orleans Airport).
@@ -134,8 +158,8 @@ def fetch_observed_high_low():
 
 def fetch_forecast():
     """
-    Returns today's forecast high and low for New Orleans (°F)
-    using an average of Open-Meteo and NWS, blended with observed temps.
+    Returns today's forecast high and low for New Orleans (°F).
+    Priority: CLI report (Kalshi's source) > blended observed > forecast avg.
     """
     # ── Source 1: Open-Meteo ───────────────────────────────────────────────
     try:
@@ -158,12 +182,12 @@ def fetch_forecast():
         ]
         ensemble_high = max(today_temps)
         ensemble_low  = min(today_temps)
-        log.info(f"[open-meteo ensemble] high={ensemble_high:.1f}°F  low={ensemble_low:.1f}°F")
+        log.info(f"[open-meteo] high={ensemble_high:.1f}°F  low={ensemble_low:.1f}°F")
     except Exception as e:
-        log.info(f"[open-meteo ensemble] FAILED: {e}")
+        log.info(f"[open-meteo] FAILED: {e}")
         ensemble_high = ensemble_low = None
 
-    # ── Source 2: National Weather Service ────────────────────────────────
+    # ── Source 2: NWS Forecast ─────────────────────────────────────────────
     try:
         points_url = "https://api.weather.gov/points/29.9511,-90.0715"
         headers = {"User-Agent": "weather-bot/1.0"}
@@ -180,12 +204,12 @@ def fetch_forecast():
         ]
         nws_high = max(nws_temps) if nws_temps else None
         nws_low  = min(nws_temps) if nws_temps else None
-        log.info(f"[nws] high={nws_high:.1f}°F  low={nws_low:.1f}°F")
+        log.info(f"[nws forecast] high={nws_high:.1f}°F  low={nws_low:.1f}°F")
     except Exception as e:
-        log.info(f"[nws] FAILED: {e}")
+        log.info(f"[nws forecast] FAILED: {e}")
         nws_high = nws_low = None
 
-    # ── Average sources ────────────────────────────────────────────────────
+    # ── Average forecast sources ───────────────────────────────────────────
     highs = [h for h in [ensemble_high, nws_high] if h is not None]
     lows  = [l for l in [ensemble_low,  nws_low]  if l is not None]
     if not highs or not lows:
@@ -194,7 +218,13 @@ def fetch_forecast():
     forecast_low  = sum(lows)  / len(lows)
     log.info(f"[forecast avg] high={forecast_high:.1f}°F  low={forecast_low:.1f}°F")
 
-    # ── Blend with observed ────────────────────────────────────────────────
+    # ── Use CLI report if available (Kalshi's exact source) ───────────────
+    cli_high, cli_low = fetch_cli_report()
+    if cli_high is not None:
+        log.info("[using cli report as ground truth]")
+        return cli_high, cli_low
+
+    # ── Otherwise blend with observed ─────────────────────────────────────
     observed_high, observed_low = fetch_observed_high_low()
     if observed_high is not None:
         hour = datetime.datetime.now(CENTRAL).hour
@@ -206,7 +236,6 @@ def fetch_forecast():
     return forecast_high, forecast_low
 
 # ── Market parsing ─────────────────────────────────────────────────────────────
-
 def parse_threshold(title):
     title_lower = title.lower()
 
