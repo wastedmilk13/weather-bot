@@ -119,7 +119,6 @@ def fetch_forecast():
             "&temperature_unit=fahrenheit"
             "&timezone=America%2FChicago"
             "&forecast_days=2"
-            "&models=ensemble_mean"
         )
         data = requests.get(url, timeout=10).json()
         times = data["hourly"]["time"]
