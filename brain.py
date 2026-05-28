@@ -28,7 +28,7 @@ load_dotenv()
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 logging.basicConfig(
-    filename=r"C:\Users\Hayden\OneDrive\Desktop\weather-bot\bot.log",
+    filename=os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log"),
     level=logging.INFO,
     format="%(asctime)s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
