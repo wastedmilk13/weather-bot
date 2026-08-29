@@ -105,7 +105,7 @@ def kalshi_post(private_key, path, body):
 def fetch_observed_high_low():
     """
     Fetch today's observed high and low from NWS station KMSY.
-    Uses limit=48 to capture overnight readings.
+    Uses limit=200 to capture overnight readings.
     Low temp only uses readings from 12am-5am and 9pm-11:59pm
     since that's when the daily low actually occurs.
     """
@@ -142,7 +142,7 @@ def fetch_observed_high_low():
 
             # Only use overnight hours for low temp
             hour = ts_dt.hour
-            if hour <= 5 or hour >= 21:
+            if hour <= 6 or hour >= 22:
                 low_temps.append(temp_f)
 
         if not all_temps:
