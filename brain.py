@@ -105,7 +105,9 @@ def kalshi_post(private_key, path, body):
 def fetch_observed_high_low():
     """
     Fetch today's observed high and low from NWS station KMSY.
-    Uses limit=48 to capture overnight lows even during afternoon runs.
+    Uses limit=48 to capture overnight readings.
+    Low temp only uses readings from 12am-5am and 9pm-11:59pm
+    since that's when the daily low actually occurs.
     """
     try:
         url = "https://api.weather.gov/stations/KMSY/observations?limit=48"
@@ -114,23 +116,51 @@ def fetch_observed_high_low():
         features = resp.get("features", [])
         now = datetime.datetime.now(CENTRAL)
         today_str = now.strftime("%Y-%m-%d")
-        temps = []
+
+        all_temps = []
+        low_temps = []
+
         for f in features:
-            ts = f["properties"]["timestamp"]
+            ts_raw = f["properties"]["timestamp"]
             temp_c = f["properties"]["temperature"]["value"]
-            if ts.startswith(today_str) and temp_c is not None:
-                temp_f = temp_c * 9 / 5 + 32
-                temps.append(temp_f)
-        if not temps:
+            if temp_c is None:
+                continue
+
+            # Parse timestamp to Central time
+            try:
+                ts_dt = datetime.datetime.fromisoformat(
+                    ts_raw.replace("Z", "+00:00")
+                ).astimezone(CENTRAL)
+            except Exception:
+                continue
+
+            if ts_dt.strftime("%Y-%m-%d") != today_str:
+                continue
+
+            temp_f = temp_c * 9 / 5 + 32
+            all_temps.append(temp_f)
+
+            # Only use overnight hours for low temp
+            hour = ts_dt.hour
+            if hour <= 5 or hour >= 21:
+                low_temps.append(temp_f)
+
+        if not all_temps:
             return None, None
-        observed_high = max(temps)
-        observed_low  = min(temps)
-        log.info(f"[observed] high={observed_high:.1f}F  low={observed_low:.1f}F  ({len(temps)} readings)")
+
+        observed_high = max(all_temps)
+        observed_low  = min(low_temps) if low_temps else None
+
+        if observed_low is not None:
+            log.info(f"[observed] high={observed_high:.1f}F  low={observed_low:.1f}F  ({len(all_temps)} readings, {len(low_temps)} overnight)")
+        else:
+            log.info(f"[observed] high={observed_high:.1f}F  low=None (no overnight readings yet)  ({len(all_temps)} readings)")
+
         return observed_high, observed_low
+
     except Exception as e:
         log.info(f"[observed] FAILED: {e}")
         return None, None
-
 
 def fetch_forecast():
     """
@@ -194,16 +224,18 @@ def fetch_forecast():
 
     # Blend with observed
     observed_high, observed_low = fetch_observed_high_low()
-    if observed_high is not None:
+    if observed_high is not None or observed_low is not None:
         hour = datetime.datetime.now(CENTRAL).hour
-        # High: trust observed more as afternoon progresses
         high_obs_weight = min(1.0, hour / 15)
-        # Low: trust observed more in morning, less in afternoon
-        low_obs_weight = min(1.0, hour / 8) if hour <= 8 else max(0.3, 1 - (hour - 8) / 16)
-        blended_high = high_obs_weight * observed_high + (1 - high_obs_weight) * forecast_high
-        blended_low  = low_obs_weight  * observed_low  + (1 - low_obs_weight)  * forecast_low
-        log.info(f"[blended] high={blended_high:.1f}F (obs={high_obs_weight:.0%})  low={blended_low:.1f}F (obs={low_obs_weight:.0%})")
-        return blended_high, blended_low
+        low_obs_weight  = min(1.0, hour / 8) if hour <= 8 else max(0.3, 1 - (hour - 8) / 16)
+
+        if observed_high is not None:
+            forecast_high = high_obs_weight * observed_high + (1 - high_obs_weight) * forecast_high
+
+        if observed_low is not None:
+            forecast_low = low_obs_weight * observed_low + (1 - low_obs_weight) * forecast_low
+
+        log.info(f"[blended] high={forecast_high:.1f}F  low={forecast_low:.1f}F")
 
     return forecast_high, forecast_low
 
