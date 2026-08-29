@@ -105,44 +105,13 @@ def kalshi_post(private_key, path, body):
 
 
 # ── Weather forecast ───────────────────────────────────────────────────────────
-def fetch_cli_report():
-    """
-    Fetch the NWS Climatological Daily Report for MSY (New Orleans Airport).
-    This is the exact source Kalshi uses to resolve temperature markets.
-    Only returns data if the report is for TODAY — otherwise returns (None, None).
-    """
-    try:
-        url = "https://forecast.weather.gov/product.php?site=LIX&product=CLI&issuedby=MSY"
-        headers = {"User-Agent": "weather-bot/1.0"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        text = resp.text
-
-        # Check the report date matches today
-        today_str = datetime.datetime.now(CENTRAL).strftime("%B %d, %Y").upper()
-        # e.g. "MAY 28, 2026"
-        if today_str not in text.upper():
-            log.info(f"[cli report] Report is not for today ({today_str}), skipping")
-            return None, None
-
-        high_match = re.search(r"MAXIMUM\s+(\d+)", text, re.IGNORECASE)
-        low_match  = re.search(r"MINIMUM\s+(\d+)", text, re.IGNORECASE)
-        if not high_match or not low_match:
-            log.info("[cli report] Could not parse high/low from report")
-            return None, None
-
-        cli_high = float(high_match.group(1))
-        cli_low  = float(low_match.group(1))
-        log.info(f"[cli report] high={cli_high:.1f}°F  low={cli_low:.1f}°F")
-        return cli_high, cli_low
-    except Exception as e:
-        log.info(f"[cli report] FAILED: {e}")
-        return None, None
 def fetch_observed_high_low():
     """
     Fetch today's observed high and low from NWS station KMSY (New Orleans Airport).
+    Uses limit=48 to capture overnight lows even during afternoon runs.
     """
     try:
-        url = "https://api.weather.gov/stations/KMSY/observations?limit=24"
+        url = "https://api.weather.gov/stations/KMSY/observations?limit=48"
         headers = {"User-Agent": "weather-bot/1.0"}
         resp = requests.get(url, headers=headers, timeout=10).json()
         features = resp.get("features", [])
@@ -168,35 +137,33 @@ def fetch_observed_high_low():
 def fetch_forecast():
     """
     Returns today's forecast high and low for New Orleans (°F).
-    Priority: CLI report (Kalshi's source) > blended observed > forecast avg.
+    Sources: Open-Meteo daily + NWS hourly, blended with observed temps.
+    CLI report removed — Kalshi now uses The Weather Company for resolution.
     """
-    # ── Source 1: Open-Meteo ───────────────────────────────────────────────
+    # ── Source 1: Open-Meteo daily ─────────────────────────────────────────
     try:
         url = (
             "https://api.open-meteo.com/v1/forecast"
             "?latitude=29.9511&longitude=-90.0715"
-            "&hourly=temperature_2m"
+            "&daily=temperature_2m_max,temperature_2m_min"
             "&temperature_unit=fahrenheit"
             "&timezone=America%2FChicago"
             "&forecast_days=2"
         )
         data = requests.get(url, timeout=10).json()
-        times = data["hourly"]["time"]
-        temps = data["hourly"]["temperature_2m"]
-        now = datetime.datetime.now(CENTRAL)
-        today_str = now.strftime("%Y-%m-%d")
-        today_temps = [
-            t for ts, t in zip(times, temps)
-            if ts.startswith(today_str) and t is not None
-        ]
-        ensemble_high = max(today_temps)
-        ensemble_low  = min(today_temps)
+        today_str = datetime.datetime.now(CENTRAL).strftime("%Y-%m-%d")
+        dates = data["daily"]["time"]
+        highs = data["daily"]["temperature_2m_max"]
+        lows  = data["daily"]["temperature_2m_min"]
+        idx = dates.index(today_str) if today_str in dates else 0
+        ensemble_high = highs[idx]
+        ensemble_low  = lows[idx]
         log.info(f"[open-meteo] high={ensemble_high:.1f}°F  low={ensemble_low:.1f}°F")
     except Exception as e:
         log.info(f"[open-meteo] FAILED: {e}")
         ensemble_high = ensemble_low = None
 
-    # ── Source 2: NWS Forecast ─────────────────────────────────────────────
+    # ── Source 2: NWS Hourly Forecast ─────────────────────────────────────
     try:
         points_url = "https://api.weather.gov/points/29.9511,-90.0715"
         headers = {"User-Agent": "weather-bot/1.0"}
@@ -227,23 +194,149 @@ def fetch_forecast():
     forecast_low  = sum(lows)  / len(lows)
     log.info(f"[forecast avg] high={forecast_high:.1f}°F  low={forecast_low:.1f}°F")
 
-    # ── Use CLI report if available (Kalshi's exact source) ───────────────
-    cli_high, cli_low = fetch_cli_report()
-    if cli_high is not None:
-        log.info("[using cli report as ground truth]")
-        return cli_high, cli_low, True
-
-    # ── Otherwise blend with observed ─────────────────────────────────────
+    # ── Blend with observed ────────────────────────────────────────────────
     observed_high, observed_low = fetch_observed_high_low()
     if observed_high is not None:
         hour = datetime.datetime.now(CENTRAL).hour
-        obs_weight = min(1.0, hour / 18)
-        forecast_high = obs_weight * observed_high + (1 - obs_weight) * forecast_high
-        forecast_low  = obs_weight * observed_low  + (1 - obs_weight) * forecast_low
-        log.info(f"[blended] high={forecast_high:.1f}°F  low={forecast_low:.1f}°F  (obs_weight={obs_weight:.0%})")
+        # Weight observed high more as day progresses (peaks ~3pm)
+        # Weight observed low more in morning when overnight low is known
+        high_obs_weight = min(1.0, hour / 15)
+        low_obs_weight  = min(1.0, hour / 8) if hour <= 8 else max(0.5, 1 - (hour - 8) / 16)
+        forecast_high = high_obs_weight * observed_high + (1 - high_obs_weight) * forecast_high
+        forecast_low  = low_obs_weight  * observed_low  + (1 - low_obs_weight)  * forecast_low
+        log.info(f"[blended] high={forecast_high:.1f}°F (obs={high_obs_weight:.0%})  low={forecast_low:.1f}°F (obs={low_obs_weight:.0%})")
 
     return forecast_high, forecast_low, False
-# ── Market parsing ─────────────────────────────────────────────────────────────
+
+    )
+
+
+# ── Weather forecast ───────────────────────────────────────────────────────────
+def fetch_observed_high_low():
+    """
+    Fetch today's observed high and low from NWS station KMSY (New Orleans Airport).
+    Uses limit=48 to capture overnight lows even during afternoon runs.
+    """
+    try:
+        url = "https://api.weather.gov/stations/KMSY/observations?limit=48"
+        headers = {"User-Agent": "weather-bot/1.0"}
+        resp = requests.get(url, headers=headers, timeout=10).json()
+        features = resp.get("features", [])
+        now = datetime.datetime.now(CENTRAL)
+        today_str = now.strftime("%Y-%m-%d")
+        temps = []
+        for f in features:
+            ts = f["properties"]["timestamp"]
+            temp_c = f["properties"]["temperature"]["value"]
+            if ts.startswith(today_str) and temp_c is not None:
+                temp_f = temp_c * 9/5 + 32
+                temps.append(temp_f)
+        if not temps:
+            return None, None
+        observed_high = max(temps)
+        observed_low  = min(temps)
+        log.info(f"[observed] high={observed_high:.1f}°F  low={observed_low:.1f}°F  ({len(temps)} readings)")
+        return observed_high, observed_low
+    except Exception as e:
+        log.info(f"[observed] FAILED: {e}")
+        return None, None
+
+def fetch_forecast():
+    """
+    Returns today's forecast high and low for New Orleans (°F).
+    Sources: Open-Meteo daily + NWS hourly, blended with observed temps.
+    CLI report removed — Kalshi now uses The Weather Company for resolution.
+    """
+    # ── Source 1: Open-Meteo daily ─────────────────────────────────────────
+    try:
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            "?latitude=29.9511&longitude=-90.0715"
+            "&daily=temperature_2m_max,temperature_2m_min"
+            "&temperature_unit=fahrenheit"
+            "&timezone=America%2FChicago"
+            "&forecast_days=2"
+        )
+        data = requests.get(url, timeout=10).json()
+        today_str = datetime.datetime.now(CENTRAL).strftime("%Y-%m-%d")
+        dates = data["daily"]["time"]
+        highs = data["daily"]["temperature_2m_max"]
+        lows  = data["daily"]["temperature_2m_min"]
+        idx = dates.index(today_str) if today_str in dates else 0
+        ensemble_high = highs[idx]
+        ensemble_low  = lows[idx]
+        log.info(f"[open-meteo] high={ensemble_high:.1f}°F  low={ensemble_low:.1f}°F")
+    except Exception as e:
+        log.info(f"[open-meteo] FAILED: {e}")
+        ensemble_high = ensemble_low = None
+
+    # ── Source 2: NWS Hourly Forecast ─────────────────────────────────────
+    try:
+        points_url = "https://api.weather.gov/points/29.9511,-90.0715"
+        headers = {"User-Agent": "weather-bot/1.0"}
+        points = requests.get(points_url, headers=headers, timeout=10).json()
+        forecast_url = points["properties"]["forecastHourly"]
+        forecast = requests.get(forecast_url, headers=headers, timeout=10).json()
+        periods = forecast["properties"]["periods"]
+        now = datetime.datetime.now(CENTRAL)
+        today_str = now.strftime("%Y-%m-%d")
+        nws_temps = [
+            p["temperature"] for p in periods
+            if p["startTime"].startswith(today_str)
+            and p["temperatureUnit"] == "F"
+        ]
+        nws_high = max(nws_temps) if nws_temps else None
+        nws_low  = min(nws_temps) if nws_temps else None
+        log.info(f"[nws forecast] high={nws_high:.1f}°F  low={nws_low:.1f}°F")
+    except Exception as e:
+        log.info(f"[nws forecast] FAILED: {e}")
+        nws_high = nws_low = None
+
+    # ── Average forecast sources ───────────────────────────────────────────
+    highs = [h for h in [ensemble_high, nws_high] if h is not None]
+    lows  = [l for l in [ensemble_low,  nws_low]  if l is not None]
+    if not highs or not lows:
+        raise RuntimeError("All forecast sources failed.")
+    forecast_high = sum(highs) / len(highs)
+    forecast_low  = sum(lows)  / len(lows)
+    log.info(f"[forecast avg] high={forecast_high:.1f}°F  low={forecast_low:.1f}°F")
+
+    # ── Blend with observed ────────────────────────────────────────────────
+    observed_high, observed_low = fetch_observed_high_low()
+    if observed_high is not None:
+        hour = datetime.datetime.now(CENTRAL).hour
+        # Weight observed high more as day progresses (peaks ~3pm)
+        # Weight observed low more in morning when overnight low is known
+        high_obs_weight = min(1.0, hour / 15)
+        low_obs_weight  = min(1.0, hour / 8) if hour <= 8 else max(0.5, 1 - (hour - 8) / 16)
+        forecast_high = high_obs_weight * observed_high + (1 - high_obs_weight) * forecast_high
+        forecast_low  = low_obs_weight  * observed_low  + (1 - low_obs_weight)  * forecast_low
+        log.info(f"[blended] high={forecast_high:.1f}°F (obs={high_obs_weight:.0%})  low={forecast_low:.1f}°F (obs={low_obs_weight:.0%})")
+
+    return forecast_high, forecast_low, False
+
+# ── Market parsing──────────────────────────────────────────────────────
+def parse_threshold(title):
+    title_lower = title.lower()
+
+    # Range markets like "83-84°"
+    range_match = re.search(r"(\d+)\s*[-–]\s*(\d+)\s*°", title)
+    if range_match:
+        low  = float(range_match.group(1))
+        high = float(range_match.group(2))
+        return (low, high, "range")
+
+    # Direction from symbols or words
+    if ">" in title or "above" in title_lower or "higher" in title_lower:
+        direction = "above"
+    elif "<" in title or "below" in title_lower or "lower" in title_lower:
+        direction = "below"
+    else:
+        return None
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*[°f]", title_lower)
+    if not match:
+
 def parse_threshold(title):
     title_lower = title.lower()
 
@@ -389,14 +482,11 @@ def place_limit_order(private_key, ticker, side, price_cents, num_contracts):
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
-
 def run():
     log.info("===== Bot run started =====")
     private_key = load_private_key(PRIVATE_KEY_PATH)
-    forecast_high, forecast_low, using_cli = fetch_forecast()
-    global FORECAST_STD_DEV
-    FORECAST_STD_DEV = CLI_STD_DEV if using_cli else 2.5
-    log.info(f"[std dev] {'CLI' if using_cli else 'forecast'} mode: {FORECAST_STD_DEV}°F")
+    forecast_high, forecast_low, _ = fetch_forecast()
+    log.info(f"[std dev] forecast mode: {FORECAST_STD_DEV}°F")
 
     for series, temp_type in WEATHER_SERIES:
         forecast_temp = forecast_high if temp_type == "high" else forecast_low
@@ -428,6 +518,7 @@ def run():
                 direction = parsed[2]
             else:
                 threshold, direction = parsed
+
             # 3. Compute confidence
             side, confidence = compute_confidence(forecast_temp, threshold, direction)
             if confidence is None or confidence < CONFIDENCE_THRESHOLD:
@@ -440,7 +531,7 @@ def run():
             ask_price_dollars = float(yes_ask) if side == "yes" else float(no_ask) if (yes_ask if side == "yes" else no_ask) else None
             ask_price = round(ask_price_dollars * 100) if ask_price_dollars else None
 
-            if ask_price is None or ask_price <= 0 or ask_price >= 99:
+            if ask_price is None or ask_price <= 0 or ask_price < 10 or ask_price >= 99:
                 log.info(f"  SKIP (no ask price for {side}): {title}")
                 continue
 
