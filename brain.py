@@ -110,7 +110,7 @@ def fetch_observed_high_low():
     since that's when the daily low actually occurs.
     """
     try:
-        url = "https://api.weather.gov/stations/KMSY/observations?limit=48"
+        url = "https://api.weather.gov/stations/KMSY/observations?limit=200"
         headers = {"User-Agent": "weather-bot/1.0"}
         resp = requests.get(url, headers=headers, timeout=10).json()
         features = resp.get("features", [])
