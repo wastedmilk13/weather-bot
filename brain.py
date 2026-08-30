@@ -48,7 +48,7 @@ MIN_DOLLARS          = 10
 WINDOW_HOURS         = 18
 FORECAST_STD_DEV     = 2.5
 MIN_ASK_CENTS        = 10
-MAX_ASK_CENTS        = 98
+MAX_ASK_CENTS        = 99
 TOMORROW_API_KEY     = "RQJDkNtidWYYhmo7GwQweWB38eEzTFGv"
 
 WEATHER_SERIES = [
@@ -255,14 +255,21 @@ def fetch_forecast():
     if observed_high is not None:
         forecast_high = high_obs_weight * observed_high + (1 - high_obs_weight) * forecast_high
 
-    # For low: if we have overnight readings, trust them completely
+    # For low: only fully trust observed after 10pm when overnight is complete
     if observed_low is not None:
-        forecast_low = observed_low
-        log.info(f"[using observed low] {forecast_low:.1f}F (overnight readings available)")
-    
+        hour = datetime.datetime.now(CENTRAL).hour
+        if hour >= 22:
+            forecast_low = observed_low
+            log.info(f"[using observed low] {forecast_low:.1f}F (overnight complete)")
+        elif hour >= 18:
+            forecast_low = 0.7 * observed_low + 0.3 * forecast_low
+            log.info(f"[partial observed low] {forecast_low:.1f}F (70% observed)")
+        else:
+            forecast_low = 0.3 * observed_low + 0.7 * forecast_low
+            log.info(f"[partial observed low] {forecast_low:.1f}F (30% observed)")
+
     log.info(f"[blended] high={forecast_high:.1f}F  low={forecast_low:.1f}F")
     return forecast_high, forecast_low
-
 # ── Market parsing ─────────────────────────────────────────────────────────────
 
 def parse_threshold(title):
@@ -378,15 +385,14 @@ def run():
     forecast_low  = round(forecast_low)
     hour = datetime.datetime.now(CENTRAL).hour
     global FORECAST_STD_DEV
-    if hour >= 18:
-        FORECAST_STD_DEV = 0.5
+    if hour >= 22:
+        FORECAST_STD_DEV = 0.5   # low is locked in
+    elif hour >= 18:
+        FORECAST_STD_DEV = 1.0   # high is settled, low nearly there
     elif hour >= 14:
-        FORECAST_STD_DEV = 1.0
-    elif hour >= 10:
-        FORECAST_STD_DEV = 2.5
+        FORECAST_STD_DEV = 1.5   # high nearly settled
     else:
-        FORECAST_STD_DEV = 2.5
-    log.info(f"[using] high={forecast_high}F  low={forecast_low}F  std_dev={FORECAST_STD_DEV}F")
+        FORECAST_STD_DEV = 2.5   # morning, wide uncertainty    log.info(f"[using] high={forecast_high}F  low={forecast_low}F  std_dev={FORECAST_STD_DEV}F")
 
     for series, temp_type in WEATHER_SERIES:
         forecast_temp = forecast_high if temp_type == "high" else forecast_low
