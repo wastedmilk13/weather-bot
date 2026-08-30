@@ -2,11 +2,12 @@
 brain.py - Weather bot trading brain for New Orleans Kalshi markets
 
 Strategy:
-  - Fetch Open-Meteo daily + NWS hourly + Tomorrow.io forecasts for New Orleans
-  - Fetch open Kalshi markets closing within 18 hours (KXHIGHTNOLA, KXLOWTNOLA)
+  - Fetch Open-Meteo daily + NWS hourly + Tomorrow.io + Visual Crossing forecasts
+  - Fetch open Kalshi markets (KXHIGHTNOLA, KXLOWTNOLA)
   - Parse each market's threshold from its title
   - Compute confidence the market resolves Yes or No using forecast + uncertainty model
   - If confidence >= 80%, place a limit order scaled to confidence ($10-$50)
+  - Runs at 10am, 12pm, 2pm, 6pm Central
 """
 
 import logging
@@ -50,6 +51,7 @@ FORECAST_STD_DEV     = 2.5
 MIN_ASK_CENTS        = 10
 MAX_ASK_CENTS        = 99
 TOMORROW_API_KEY     = "RQJDkNtidWYYhmo7GwQweWB38eEzTFGv"
+VISUAL_CROSSING_KEY  = "AFWGGRAZPKSZ8NRQW4SBMZ6XR"
 
 WEATHER_SERIES = [
     ("KXHIGHTNOLA", "high"),
@@ -158,9 +160,7 @@ def fetch_observed_high_low():
 
 
 def fetch_tomorrow_forecast():
-    """
-    Fetch today's forecast high and low from Tomorrow.io.
-    """
+    """Fetch today's forecast from Tomorrow.io."""
     try:
         url = (
             "https://api.tomorrow.io/v4/weather/forecast"
@@ -171,8 +171,7 @@ def fetch_tomorrow_forecast():
         )
         resp = requests.get(url, timeout=10).json()
         today_str = datetime.datetime.now(CENTRAL).strftime("%Y-%m-%d")
-        timelines = resp["timelines"]["daily"]
-        for day in timelines:
+        for day in resp["timelines"]["daily"]:
             if day["time"].startswith(today_str):
                 high = day["values"]["temperatureMax"]
                 low  = day["values"]["temperatureMin"]
@@ -185,11 +184,30 @@ def fetch_tomorrow_forecast():
         return None, None
 
 
+def fetch_visual_crossing_forecast():
+    """Fetch today's forecast from Visual Crossing."""
+    try:
+        url = (
+            "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline"
+            f"/29.9511,-90.0715/today"
+            f"?unitGroup=us&include=days&key={VISUAL_CROSSING_KEY}&contentType=json"
+        )
+        resp = requests.get(url, timeout=10).json()
+        day = resp["days"][0]
+        high = day["tempmax"]
+        low  = day["tempmin"]
+        log.info(f"[visual crossing] high={high:.1f}F  low={low:.1f}F")
+        return high, low
+    except Exception as e:
+        log.info(f"[visual crossing] FAILED: {e}")
+        return None, None
+
+
 def fetch_forecast():
     """
     Returns today's forecast high and low for New Orleans in degrees F.
-    Sources: Open-Meteo (tiebreaker) + NWS hourly + Tomorrow.io + Visual Crossing
-    blended with observed temps.
+    Sources: NWS + Tomorrow.io + Visual Crossing (primary), Open-Meteo (tiebreaker).
+    Blended with observed temps from KMSY station.
     """
     # Source 1: Open-Meteo daily (tiebreaker)
     try:
@@ -242,7 +260,7 @@ def fetch_forecast():
     # Source 4: Visual Crossing
     vc_high, vc_low = fetch_visual_crossing_forecast()
 
-    # Average sources — NWS, Tomorrow.io, Visual Crossing primary; Open-Meteo tiebreaker
+    # Average — NWS, Tomorrow.io, Visual Crossing primary; Open-Meteo tiebreaker
     highs = [h for h in [nws_high, tomorrow_high, vc_high, ensemble_high] if h is not None]
     lows  = [l for l in [nws_low,  tomorrow_low,  vc_low,  ensemble_low]  if l is not None]
     if not highs or not lows:
@@ -273,6 +291,8 @@ def fetch_forecast():
 
     log.info(f"[blended] high={forecast_high:.1f}F  low={forecast_low:.1f}F")
     return forecast_high, forecast_low
+
+
 # ── Market parsing ─────────────────────────────────────────────────────────────
 
 def parse_threshold(title):
@@ -389,13 +409,16 @@ def run():
     hour = datetime.datetime.now(CENTRAL).hour
     global FORECAST_STD_DEV
     if hour >= 22:
-        FORECAST_STD_DEV = 0.5   # low is locked in
+        FORECAST_STD_DEV = 0.5   # overnight low locked in, high settled
     elif hour >= 18:
-        FORECAST_STD_DEV = 1.0   # high is settled, low nearly there
+        FORECAST_STD_DEV = 1.0   # high settled, low nearly there
     elif hour >= 14:
         FORECAST_STD_DEV = 1.5   # high nearly settled
+    elif hour >= 12:
+        FORECAST_STD_DEV = 2.0   # noon — high confidence building
     else:
-        FORECAST_STD_DEV = 2.5   # morning, wide uncertainty    log.info(f"[using] high={forecast_high}F  low={forecast_low}F  std_dev={FORECAST_STD_DEV}F")
+        FORECAST_STD_DEV = 2.5   # morning, wide uncertainty
+    log.info(f"[using] high={forecast_high}F  low={forecast_low}F  std_dev={FORECAST_STD_DEV}F")
 
     for series, temp_type in WEATHER_SERIES:
         forecast_temp = forecast_high if temp_type == "high" else forecast_low
