@@ -378,10 +378,12 @@ def run():
     forecast_low  = round(forecast_low)
     hour = datetime.datetime.now(CENTRAL).hour
     global FORECAST_STD_DEV
-    if hour >= 12:
-        FORECAST_STD_DEV = 1.5
-    elif hour >= 8:
-        FORECAST_STD_DEV = 2.0
+    if hour >= 18:
+        FORECAST_STD_DEV = 0.5
+    elif hour >= 14:
+        FORECAST_STD_DEV = 1.0
+    elif hour >= 10:
+        FORECAST_STD_DEV = 2.5
     else:
         FORECAST_STD_DEV = 2.5
     log.info(f"[using] high={forecast_high}F  low={forecast_low}F  std_dev={FORECAST_STD_DEV}F")
