@@ -357,6 +357,9 @@ def run():
     log.info("===== Bot run started =====")
     private_key = load_private_key(PRIVATE_KEY_PATH)
     forecast_high, forecast_low = fetch_forecast()
+    # Round to nearest integer — Kalshi rounds final temps before resolving
+    forecast_high = round(forecast_high)
+    forecast_low  = round(forecast_low)
     hour = datetime.datetime.now(CENTRAL).hour
     global FORECAST_STD_DEV
     if hour >= 12:
@@ -365,7 +368,7 @@ def run():
         FORECAST_STD_DEV = 2.0
     else:
         FORECAST_STD_DEV = 2.5
-    log.info(f"[using] high={forecast_high:.1f}F  low={forecast_low:.1f}F  std_dev={FORECAST_STD_DEV}F")
+    log.info(f"[using] high={forecast_high}F  low={forecast_low}F  std_dev={FORECAST_STD_DEV}F")
 
     for series, temp_type in WEATHER_SERIES:
         forecast_temp = forecast_high if temp_type == "high" else forecast_low
