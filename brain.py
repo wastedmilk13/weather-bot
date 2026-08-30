@@ -272,8 +272,16 @@ def fetch_forecast():
     # Blend with observed
     observed_high, observed_low = fetch_observed_high_low()
     hour = datetime.datetime.now(CENTRAL).hour
-    high_obs_weight = min(1.0, hour / 15)
-
+    # After noon, trust observed high much more aggressively
+    # New Orleans summer highs peak 2-4pm, so by noon observed is very reliable
+    if hour >= 14:
+        high_obs_weight = 1.0
+    elif hour >= 12:
+        high_obs_weight = 0.85
+    elif hour >= 10:
+        high_obs_weight = 0.5
+    else:
+        high_obs_weight = min(1.0, hour / 15)
     if observed_high is not None:
         forecast_high = high_obs_weight * observed_high + (1 - high_obs_weight) * forecast_high
 
