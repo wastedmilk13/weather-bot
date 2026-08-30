@@ -188,9 +188,10 @@ def fetch_tomorrow_forecast():
 def fetch_forecast():
     """
     Returns today's forecast high and low for New Orleans in degrees F.
-    Sources: Open-Meteo daily + NWS hourly + Tomorrow.io, blended with observed temps.
+    Sources: Open-Meteo (tiebreaker) + NWS hourly + Tomorrow.io + Visual Crossing
+    blended with observed temps.
     """
-    # Source 1: Open-Meteo daily
+    # Source 1: Open-Meteo daily (tiebreaker)
     try:
         url = (
             "https://api.open-meteo.com/v1/forecast"
@@ -238,9 +239,12 @@ def fetch_forecast():
     # Source 3: Tomorrow.io
     tomorrow_high, tomorrow_low = fetch_tomorrow_forecast()
 
-    # Average all forecast sources
-    highs = [h for h in [ensemble_high, nws_high, tomorrow_high] if h is not None]
-    lows  = [l for l in [ensemble_low,  nws_low,  tomorrow_low]  if l is not None]
+    # Source 4: Visual Crossing
+    vc_high, vc_low = fetch_visual_crossing_forecast()
+
+    # Average sources — NWS, Tomorrow.io, Visual Crossing primary; Open-Meteo tiebreaker
+    highs = [h for h in [nws_high, tomorrow_high, vc_high, ensemble_high] if h is not None]
+    lows  = [l for l in [nws_low,  tomorrow_low,  vc_low,  ensemble_low]  if l is not None]
     if not highs or not lows:
         raise RuntimeError("All forecast sources failed.")
     forecast_high = sum(highs) / len(highs)
@@ -257,7 +261,6 @@ def fetch_forecast():
 
     # For low: only fully trust observed after 10pm when overnight is complete
     if observed_low is not None:
-        hour = datetime.datetime.now(CENTRAL).hour
         if hour >= 22:
             forecast_low = observed_low
             log.info(f"[using observed low] {forecast_low:.1f}F (overnight complete)")
