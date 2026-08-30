@@ -249,20 +249,19 @@ def fetch_forecast():
 
     # Blend with observed
     observed_high, observed_low = fetch_observed_high_low()
-    if observed_high is not None or observed_low is not None:
-        hour = datetime.datetime.now(CENTRAL).hour
-        high_obs_weight = min(1.0, hour / 15)
-        low_obs_weight  = min(1.0, hour / 8) if hour <= 8 else max(0.3, 1 - (hour - 8) / 16)
+    hour = datetime.datetime.now(CENTRAL).hour
+    high_obs_weight = min(1.0, hour / 15)
 
-        if observed_high is not None:
-            forecast_high = high_obs_weight * observed_high + (1 - high_obs_weight) * forecast_high
-        if observed_low is not None:
-            forecast_low = low_obs_weight * observed_low + (1 - low_obs_weight) * forecast_low
+    if observed_high is not None:
+        forecast_high = high_obs_weight * observed_high + (1 - high_obs_weight) * forecast_high
 
-        log.info(f"[blended] high={forecast_high:.1f}F  low={forecast_low:.1f}F")
-
+    # For low: if we have overnight readings, trust them completely
+    if observed_low is not None:
+        forecast_low = observed_low
+        log.info(f"[using observed low] {forecast_low:.1f}F (overnight readings available)")
+    
+    log.info(f"[blended] high={forecast_high:.1f}F  low={forecast_low:.1f}F")
     return forecast_high, forecast_low
-
 
 # ── Market parsing ─────────────────────────────────────────────────────────────
 
