@@ -357,6 +357,14 @@ def run():
     log.info("===== Bot run started =====")
     private_key = load_private_key(PRIVATE_KEY_PATH)
     forecast_high, forecast_low = fetch_forecast()
+    hour = datetime.datetime.now(CENTRAL).hour
+    global FORECAST_STD_DEV
+    if hour >= 12:
+        FORECAST_STD_DEV = 1.5
+    elif hour >= 8:
+        FORECAST_STD_DEV = 2.0
+    else:
+        FORECAST_STD_DEV = 2.5
     log.info(f"[using] high={forecast_high:.1f}F  low={forecast_low:.1f}F  std_dev={FORECAST_STD_DEV}F")
 
     for series, temp_type in WEATHER_SERIES:
