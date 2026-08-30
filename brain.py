@@ -2,7 +2,7 @@
 brain.py - Weather bot trading brain for New Orleans Kalshi markets
 
 Strategy:
-  - Fetch Open-Meteo daily forecast for New Orleans
+  - Fetch Open-Meteo daily + NWS hourly + Tomorrow.io forecasts for New Orleans
   - Fetch open Kalshi markets closing within 18 hours (KXHIGHTNOLA, KXLOWTNOLA)
   - Parse each market's threshold from its title
   - Compute confidence the market resolves Yes or No using forecast + uncertainty model
@@ -42,20 +42,21 @@ PRIVATE_KEY_PATH  = os.getenv("KALSHI_PRIVATE_KEY_PATH")
 BASE_URL          = "https://api.elections.kalshi.com/trade-api/v2"
 CENTRAL           = ZoneInfo("America/Chicago")
 
-CONFIDENCE_THRESHOLD = 0.80   # minimum confidence to trade
-MAX_DOLLARS          = 50     # max position size in dollars
-MIN_DOLLARS          = 10     # min position size at threshold confidence
-WINDOW_HOURS         = 18     # only trade markets closing within this many hours
-FORECAST_STD_DEV     = 2.5    # degrees F uncertainty model standard deviation
-MIN_ASK_CENTS        = 10     # skip trades where ask < 10 cents
-MAX_ASK_CENTS        = 98     # skip trades where ask > 98 cents
+CONFIDENCE_THRESHOLD = 0.80
+MAX_DOLLARS          = 50
+MIN_DOLLARS          = 10
+WINDOW_HOURS         = 18
+FORECAST_STD_DEV     = 2.5
+MIN_ASK_CENTS        = 10
+MAX_ASK_CENTS        = 98
+TOMORROW_API_KEY     = "RQJDkNtidWYYhmo7GwQweWB38eEzTFGv"
 
 WEATHER_SERIES = [
     ("KXHIGHTNOLA", "high"),
     ("KXLOWTNOLA",  "low"),
 ]
 
-DRY_RUN = True  # Set True to simulate orders without submitting
+DRY_RUN = True
 
 
 # ── Kalshi auth helpers ────────────────────────────────────────────────────────
@@ -106,8 +107,7 @@ def fetch_observed_high_low():
     """
     Fetch today's observed high and low from NWS station KMSY.
     Uses limit=200 to capture overnight readings.
-    Low temp only uses readings from 12am-5am and 9pm-11:59pm
-    since that's when the daily low actually occurs.
+    Low temp only uses readings from 12am-6am and 10pm-11:59pm.
     """
     try:
         url = "https://api.weather.gov/stations/KMSY/observations?limit=200"
@@ -125,22 +125,16 @@ def fetch_observed_high_low():
             temp_c = f["properties"]["temperature"]["value"]
             if temp_c is None:
                 continue
-
-            # Parse timestamp to Central time
             try:
                 ts_dt = datetime.datetime.fromisoformat(
                     ts_raw.replace("Z", "+00:00")
                 ).astimezone(CENTRAL)
             except Exception:
                 continue
-
             if ts_dt.strftime("%Y-%m-%d") != today_str:
                 continue
-
             temp_f = temp_c * 9 / 5 + 32
             all_temps.append(temp_f)
-
-            # Only use overnight hours for low temp
             hour = ts_dt.hour
             if hour <= 6 or hour >= 22:
                 low_temps.append(temp_f)
@@ -162,11 +156,39 @@ def fetch_observed_high_low():
         log.info(f"[observed] FAILED: {e}")
         return None, None
 
+
+def fetch_tomorrow_forecast():
+    """
+    Fetch today's forecast high and low from Tomorrow.io.
+    """
+    try:
+        url = (
+            "https://api.tomorrow.io/v4/weather/forecast"
+            "?location=29.9511,-90.0715"
+            "&timesteps=1d"
+            "&units=imperial"
+            f"&apikey={TOMORROW_API_KEY}"
+        )
+        resp = requests.get(url, timeout=10).json()
+        today_str = datetime.datetime.now(CENTRAL).strftime("%Y-%m-%d")
+        timelines = resp["timelines"]["daily"]
+        for day in timelines:
+            if day["time"].startswith(today_str):
+                high = day["values"]["temperatureMax"]
+                low  = day["values"]["temperatureMin"]
+                log.info(f"[tomorrow.io] high={high:.1f}F  low={low:.1f}F")
+                return high, low
+        log.info("[tomorrow.io] No data for today")
+        return None, None
+    except Exception as e:
+        log.info(f"[tomorrow.io] FAILED: {e}")
+        return None, None
+
+
 def fetch_forecast():
     """
     Returns today's forecast high and low for New Orleans in degrees F.
-    Sources: Open-Meteo daily + NWS hourly, blended with observed temps.
-    Kalshi now uses The Weather Company for resolution.
+    Sources: Open-Meteo daily + NWS hourly + Tomorrow.io, blended with observed temps.
     """
     # Source 1: Open-Meteo daily
     try:
@@ -213,9 +235,12 @@ def fetch_forecast():
         log.info(f"[nws forecast] FAILED: {e}")
         nws_high = nws_low = None
 
-    # Average forecast sources
-    highs = [h for h in [ensemble_high, nws_high] if h is not None]
-    lows  = [l for l in [ensemble_low,  nws_low]  if l is not None]
+    # Source 3: Tomorrow.io
+    tomorrow_high, tomorrow_low = fetch_tomorrow_forecast()
+
+    # Average all forecast sources
+    highs = [h for h in [ensemble_high, nws_high, tomorrow_high] if h is not None]
+    lows  = [l for l in [ensemble_low,  nws_low,  tomorrow_low]  if l is not None]
     if not highs or not lows:
         raise RuntimeError("All forecast sources failed.")
     forecast_high = sum(highs) / len(highs)
@@ -231,7 +256,6 @@ def fetch_forecast():
 
         if observed_high is not None:
             forecast_high = high_obs_weight * observed_high + (1 - high_obs_weight) * forecast_high
-
         if observed_low is not None:
             forecast_low = low_obs_weight * observed_low + (1 - low_obs_weight) * forecast_low
 
@@ -245,14 +269,12 @@ def fetch_forecast():
 def parse_threshold(title):
     title_lower = title.lower()
 
-    # Range markets like "83-84 degrees"
     range_match = re.search(r"(\d+)\s*[-]\s*(\d+)\s*", title)
     if range_match:
         low  = float(range_match.group(1))
         high = float(range_match.group(2))
         return (low, high, "range")
 
-    # Direction from symbols or words
     if ">" in title or "above" in title_lower or "higher" in title_lower:
         direction = "above"
     elif "<" in title or "below" in title_lower or "lower" in title_lower:
@@ -267,7 +289,6 @@ def parse_threshold(title):
 
 
 def market_closes_within(market, hours):
-    """Return True if the market closes within hours from now."""
     close_str = market.get("close_time") or market.get("expiration_time")
     if not close_str:
         return False
@@ -283,7 +304,6 @@ def market_closes_within(market, hours):
 # ── Confidence & sizing ────────────────────────────────────────────────────────
 
 def normal_cdf(x, mu, sigma):
-    """P(X <= x) for X ~ N(mu, sigma)."""
     return 0.5 * (1 + math.erf((x - mu) / (sigma * math.sqrt(2))))
 
 
@@ -313,7 +333,6 @@ def compute_confidence(forecast_temp, threshold, direction=None):
 
 
 def scale_dollars(confidence):
-    """Linear scale: 80% confidence maps to $10, 99%+ maps to $50."""
     low_conf  = CONFIDENCE_THRESHOLD
     high_conf = 0.99
     clamped   = min(max(confidence, low_conf), high_conf)
@@ -322,7 +341,6 @@ def scale_dollars(confidence):
 
 
 def dollars_to_contracts(dollars, price_cents):
-    """Number of contracts = floor(budget / cost_per_contract)."""
     if price_cents <= 0:
         return 0
     cost_per = price_cents / 100
@@ -357,7 +375,6 @@ def run():
     log.info("===== Bot run started =====")
     private_key = load_private_key(PRIVATE_KEY_PATH)
     forecast_high, forecast_low = fetch_forecast()
-    # Round to nearest integer — Kalshi rounds final temps before resolving
     forecast_high = round(forecast_high)
     forecast_low  = round(forecast_low)
     hour = datetime.datetime.now(CENTRAL).hour
@@ -372,7 +389,7 @@ def run():
 
     for series, temp_type in WEATHER_SERIES:
         forecast_temp = forecast_high if temp_type == "high" else forecast_low
-        log.info(f"\n-- {series} (forecast {temp_type}: {forecast_temp:.1f}F) --")
+        log.info(f"\n-- {series} (forecast {temp_type}: {forecast_temp}F) --")
 
         resp    = kalshi_get(private_key, f"/markets?series_ticker={series}&status=open")
         markets = resp.json().get("markets", [])
@@ -385,12 +402,10 @@ def run():
             ticker = m.get("ticker", "")
             title  = m.get("title", "")
 
-            # 1. Filter: must close within window
             if not market_closes_within(m, WINDOW_HOURS):
                 log.info(f"  SKIP (outside {WINDOW_HOURS}h window): {title}")
                 continue
 
-            # 2. Parse threshold from title
             parsed = parse_threshold(title)
             if not parsed:
                 log.info(f"  SKIP (cant parse threshold): {title}")
@@ -401,13 +416,11 @@ def run():
             else:
                 threshold, direction = parsed
 
-            # 3. Compute confidence
             side, confidence = compute_confidence(forecast_temp, threshold, direction)
             if confidence is None or confidence < CONFIDENCE_THRESHOLD:
                 log.info(f"  SKIP (confidence {confidence:.1%} < {CONFIDENCE_THRESHOLD:.0%}): {title}")
                 continue
 
-            # 4. Determine ask price for our chosen side
             yes_ask = m.get("yes_ask_dollars")
             no_ask  = m.get("no_ask_dollars")
             raw = yes_ask if side == "yes" else no_ask
@@ -417,7 +430,6 @@ def run():
                 log.info(f"  SKIP (ask {ask_price}c out of range for {side}): {title}")
                 continue
 
-            # 5. Scale dollars to contracts
             dollars   = scale_dollars(confidence)
             contracts = dollars_to_contracts(dollars, ask_price)
 
@@ -426,7 +438,6 @@ def run():
             log.info(f"    Confidence={confidence:.1%}  Side={side.upper()}")
             log.info(f"    Ask={ask_price}c  Budget=${dollars:.2f}  Contracts={contracts}")
 
-            # 6. Place limit order 1 cent below ask for better fill
             limit_price = max(1, ask_price - 1)
             result = place_limit_order(private_key, ticker, side, limit_price, contracts)
             log.info(f"    Order result: {result}")
